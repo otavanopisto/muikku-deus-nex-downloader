@@ -1,7 +1,9 @@
 package fi.muikku.dnm.downloader;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
@@ -11,7 +13,9 @@ import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import javax.xml.parsers.DocumentBuilder;
@@ -34,6 +38,8 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.IOUtils;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -51,7 +57,7 @@ public class Downloader {
     Options options = new Options();
     
     options.addOption("f", "folder-no", true, "Folder's resource number");
-    options.addOption("f", "import-url", true, "Import url. Must contain %s (will be replaced with folder-no)");
+    options.addOption("i", "import-url", true, "Import url. Must contain %s (will be replaced with folder-no)");
     options.addOption("n", "name", true, "Name of deus nex document");
     options.addOption("u", "nexus-user", true, "Nexus username");
     options.addOption("p", "nexus-password", true, "Nexus password");
@@ -59,6 +65,7 @@ public class Downloader {
     options.addOption("d", "output-dir", true, "Target folder");
     options.addOption("r", "binary-lookup", true, "Binary lookup file");
     options.addOption("s", "save-binary-lookup", false, "Indicates that binary file should be saved after import");
+    options.addOption("c", "cache-folder", true, "Folder to be used as cache folder");
     
     CommandLine line = null;
     try {
@@ -81,6 +88,13 @@ public class Downloader {
       String outputDir = line.getOptionValue("output-dir");
       String importUrl = String.format(line.getOptionValue("import-url"), folderNo);
       String binaryLookupFile = null;
+      File cacheFolder = null;
+      if (line.hasOption("cache-folder")) {
+        cacheFolder = new File(line.getOptionValue("cache-folder"));
+        if (!cacheFolder.exists()) {
+          cacheFolder.mkdirs();
+        }
+      }
       
       if (line.hasOption("binary-lookup")) {
         binaryLookupFile = line.getOptionValue("binary-lookup");
@@ -91,7 +105,12 @@ public class Downloader {
       Properties binaryLookup = new Properties();
       if (binaryLookupFile != null) {
         try {
-          FileReader fileReader = new FileReader(binaryLookupFile);
+          File file = new File(binaryLookupFile);
+          if (!file.exists()) {
+            file.createNewFile();
+          }
+          
+          FileReader fileReader = new FileReader(file);
           try {
             binaryLookup.load(fileReader);
           } finally {
@@ -107,7 +126,7 @@ public class Downloader {
       System.out.println("Downloading deus nex document...");
       Document document = null;
       try {
-        document = downloadXmlDocument(importUrl, nexusUser, nexusPassword);
+        document = downloadXmlDocument(importUrl, cacheFolder, nexusUser, nexusPassword);
       } catch (SAXException | IOException | ParserConfigurationException e) {
         e.printStackTrace();
         System.err.println("Deus nex document downloading failed");
@@ -175,7 +194,10 @@ public class Downloader {
 
   private static void processDocument(Document document, Properties binaryLookup) throws XPathExpressionException {
     List<Element> dropElements = new ArrayList<>();
-    
+    Map<String, String> resourceMap = new HashMap<>();
+    int droppedBinaries = 0;
+    int bytesSaved = 0;
+     
     NodeList resourceNodes = document.getElementsByTagName("res");
     for (int i = 0, l = resourceNodes.getLength(); i < l; i++) {
       Node resourceNode = resourceNodes.item(i);
@@ -187,14 +209,15 @@ public class Downloader {
           String no = getChildNodeValue(resourceElement, "no");
           String content = getChildNodeValue(resourceElement, "content");
           String contentHash = DigestUtils.md5Hex(content);
-          if (binaryLookup.contains(contentHash)) {
-            System.out.println("  binary #" + no + " found from binary lookup. Dropping element");
+          if (binaryLookup.containsKey(contentHash)) {
+            bytesSaved += content.length();
+            droppedBinaries++;
+            resourceMap.put(no, binaryLookup.getProperty(contentHash));
             dropElements.add(resourceElement);
           } else {
             binaryLookup.put(contentHash, no);
           }
         }
-        
       }
     }
     
@@ -203,12 +226,32 @@ public class Downloader {
         dropElement.getParentNode().removeChild(dropElement);
       }
     }
+    
+    NodeList embeddedItems = document.getElementsByTagName("ix:embeddeditem");
+    for (int i = 0, l = embeddedItems.getLength(); i < l; i++) {
+      Node embeddedItem = embeddedItems.item(i);
+      
+      Node resourceNoNode = findNodeByXPath(embeddedItem, "parameters/resourceno");
+      if (resourceNoNode instanceof Element) {
+        String newResourceNo = resourceMap.get(resourceNoNode.getTextContent());
+        if (newResourceNo != null) {
+          resourceNoNode.setTextContent(newResourceNo);
+        }
+      } else {
+        System.out.println("Warning could not find resourceno from ix:embeddeditem");
+      }
+    }
+    
+    if (droppedBinaries > 0) {
+      System.out.println("  " + droppedBinaries + " binaries droppped, approx. " + FileUtils.byteCountToDisplaySize(bytesSaved) + " saved");
+    }
   }
 
   private static boolean validateOptions(CommandLine line) {
     String[] requiredOptions = {"folder-no", "import-url", "name", "nexus-user", "nexus-password", "zip-password", "output-dir"}; 
     for (String requiredOption : requiredOptions) {
       if (!line.hasOption(requiredOption)) {
+        System.out.println("Required option " + requiredOption + " is missing");
         return false;
       }
     }
@@ -256,21 +299,51 @@ public class Downloader {
     return xmlFile;
   }
 
-  private static Document downloadXmlDocument(String importUrl, String nexusUser, String nexusPassword) throws SAXException, IOException, ParserConfigurationException {
-    String authorization = Base64.encodeBase64String((nexusUser + ':' + nexusPassword).getBytes("UTF-8"));
-    URL url = new URL(importUrl);
-    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-    connection.setRequestProperty("Authorization", "Basic " + authorization);
+  private static Document downloadXmlDocument(String importUrl, File cacheDir, String nexusUser, String nexusPassword) throws SAXException, IOException, ParserConfigurationException {
+    File cacheFile = null;
+    byte[] data = null;
 
-    InputStream inputStream = connection.getInputStream();
-    try {
-      return parseXml(inputStream);
-    } finally {
-      inputStream.close();
+    if (cacheDir != null) {
+      String cacheFileName = DigestUtils.md5Hex(importUrl);
+      cacheFile = new File(cacheDir, cacheFileName);
+      if (cacheFile.exists()) {
+        FileInputStream fileInputStream = new FileInputStream(cacheFile);
+        try {
+          data = IOUtils.toByteArray(fileInputStream);
+        } finally {
+          fileInputStream.close();
+        }
+      }
+    } 
+    
+    if (data == null) {
+      String authorization = Base64.encodeBase64String((nexusUser + ':' + nexusPassword).getBytes("UTF-8"));
+      URL url = new URL(importUrl);
+      HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+      connection.setRequestProperty("Authorization", "Basic " + authorization);
+  
+      InputStream inputStream = connection.getInputStream();
+      try {
+        data = IOUtils.toByteArray(inputStream);
+      } finally {
+        inputStream.close();
+      }
+        
+      if (cacheDir != null) {
+        FileOutputStream fileOutputStream = new FileOutputStream(cacheFile);
+        try {
+          fileOutputStream.write(data);
+        } finally {
+          fileOutputStream.flush();
+          fileOutputStream.close();
+        }
+      }
     }
+
+    return parseXml(data);
   }
 
-  private static Document parseXml(InputStream is) throws SAXException, IOException, ParserConfigurationException  {
+  private static Document parseXml(byte[] data) throws SAXException, IOException, ParserConfigurationException  {
     DocumentBuilderFactory builderFactory = DocumentBuilderFactory.newInstance();
     builderFactory.setNamespaceAware(false);
     builderFactory.setValidating(false);
@@ -279,7 +352,13 @@ public class Downloader {
     builderFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-dtd-grammar", false);
     builderFactory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
     DocumentBuilder builder = builderFactory.newDocumentBuilder();
-    return builder.parse(is);
+   
+    ByteArrayInputStream inputStream = new ByteArrayInputStream(data);
+    try {
+      return builder.parse(inputStream);
+    } finally {
+      inputStream.close();
+    }
   }
   
   private static String serializeDocument(Document document) throws ClassNotFoundException, InstantiationException, IllegalAccessException, ClassCastException {
