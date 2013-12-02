@@ -34,7 +34,7 @@
           <archive>
             <manifest>
               <addClasspath>true</addClasspath>
-              <mainClass> fi.muikku.plugins.dnm.downloader.Downloader</mainClass>
+              <mainClass> fi.muikku.dnm.downloader.Downloader</mainClass>
             </manifest>
           </archive>
           <descriptorRefs>
@@ -52,9 +52,7 @@
         </executions>
       </plugin>
     </plugins>
-    
   </build>
-  
 
   <dependencies>
     <dependency>
@@ -72,5 +70,11 @@
       <artifactId>commons-cli</artifactId>
       <version>1.2</version>
     </dependency>
+    <dependency>
+      <groupId>commons-io</groupId>
+      <artifactId>commons-io</artifactId>
+      <version>2.4</version>
+    </dependency>
   </dependencies>
+  
 </project>
