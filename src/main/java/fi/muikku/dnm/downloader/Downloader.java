@@ -152,10 +152,15 @@ public class Downloader {
         System.exit(1); 
       }
       
+      File outDir = new File(outputDir);
+      if (!outDir.exists()) {
+        outDir.mkdirs();
+      }
+      
       System.out.println("Writing xml file...");
       File xmlFile = null;
       try {
-        xmlFile = writeXml(xmlData, outputDir, name);
+        xmlFile = writeXml(xmlData, outDir, name);
       } catch (IOException e) {
         e.printStackTrace();
         System.err.println("Xml file writing failed");
@@ -164,7 +169,7 @@ public class Downloader {
       
       System.out.println("Compressing xml file...");
       try {
-        compressXmlFile(xmlFile, outputDir, name, zipPassword);
+        compressXmlFile(xmlFile, outDir, name, zipPassword);
       } catch (IOException | ZipException e) {
         e.printStackTrace();
         System.err.println("Xml file compression failed");
@@ -259,8 +264,7 @@ public class Downloader {
     return true;
   }
 
-  private static void compressXmlFile(File xmlFile, String outputDir, String outputFile, String zipPassword) throws IOException, ZipException {
-    File outDir = new File(outputDir);
+  private static void compressXmlFile(File xmlFile, File outDir, String outputFile, String zipPassword) throws IOException, ZipException {
     File zipFile = new File(outDir, outputFile + ".zip");
     if (zipFile.exists()) {
       zipFile.delete();
@@ -282,9 +286,8 @@ public class Downloader {
     zipArchive.createZipFile(xmlFile, parameters);
   }
 
-  private static File writeXml(String xmlData, String outputDir, String outputFile) throws UnsupportedEncodingException, IOException {
-    File outDir = new File(outputDir);
-    File xmlFile = new File(outDir, outputFile + ".xml");
+  private static File writeXml(String xmlData, File outputDir, String outputFile) throws UnsupportedEncodingException, IOException {
+    File xmlFile = new File(outputDir, outputFile + ".xml");
     if (xmlFile.exists()) {
       xmlFile.delete();
     }
